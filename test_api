@@ -1,0 +1,169 @@
+
+import pytest
+from fastapi import HTTPException
+
+import api
+
+
+FAKE_ANALYSIS_DATA = {
+    "molecular_profile_id": "test_mutations",
+    "sample_list_id": "test_sequenced",
+    "requested_genes": ["BRAF"],
+    "successful_genes": ["BRAF"],
+    "analysis_table": [
+        {
+            "sample_id": "S1",
+            "patient_id": "P1",
+            "BRAF_mutated": True,
+            "AGE": "70",
+            "SEX": "Female",
+            "MSI_SCORE": "12.5"
+        },
+        {
+            "sample_id": "S2",
+            "patient_id": "P2",
+            "BRAF_mutated": False,
+            "AGE": "50",
+            "SEX": "male",
+            "MSI_SCORE": None
+        },
+        {
+            "sample_id": "S3",
+            "patient_id": "P3",
+            "BRAF_mutated": True,
+            "AGE": None,
+            "SEX": "FEMALE",
+            "MSI_SCORE": ""
+        }
+    ],
+    "errors": []
+}
+
+
+@pytest.fixture
+def fake_analysis_table(monkeypatch):
+    def fake_builder(**kwargs):
+        return FAKE_ANALYSIS_DATA
+
+    monkeypatch.setattr(
+        api,
+        "build_clinical_genomic_analysis_table",
+        fake_builder
+    )
+
+
+def test_no_filters_returns_every_row(
+    fake_analysis_table
+):
+    result = (
+        api.build_filtered_clinical_genomic_cohort(
+            study_id="test_study",
+            gene_symbols=["BRAF"]
+        )
+    )
+
+    assert result["filtered_row_count"] == 3
+
+
+def test_mutated_filter(
+    fake_analysis_table
+):
+    result = (
+        api.build_filtered_clinical_genomic_cohort(
+            study_id="test_study",
+            gene_symbols=["BRAF"],
+            mutation_gene="BRAF",
+            mutation_status="mutated"
+        )
+    )
+
+    sample_ids = {
+        row["sample_id"]
+        for row in result["cohort"]
+    }
+
+    assert sample_ids == {"S1", "S3"}
+
+
+def test_not_mutated_filter(
+    fake_analysis_table
+):
+    result = (
+        api.build_filtered_clinical_genomic_cohort(
+            study_id="test_study",
+            gene_symbols=["BRAF"],
+            mutation_gene="BRAF",
+            mutation_status="not_mutated"
+        )
+    )
+
+    assert result["filtered_row_count"] == 1
+    assert result["cohort"][0]["sample_id"] == "S2"
+
+
+def test_exact_value_filter_is_case_insensitive(
+    fake_analysis_table
+):
+    result = (
+        api.build_filtered_clinical_genomic_cohort(
+            study_id="test_study",
+            gene_symbols=["BRAF"],
+            clinical_attribute="SEX",
+            clinical_value="female"
+        )
+    )
+
+    sample_ids = {
+        row["sample_id"]
+        for row in result["cohort"]
+    }
+
+    assert sample_ids == {"S1", "S3"}
+
+
+def test_minimum_numeric_filter(
+    fake_analysis_table
+):
+    result = (
+        api.build_filtered_clinical_genomic_cohort(
+            study_id="test_study",
+            gene_symbols=["BRAF"],
+            clinical_attribute="AGE",
+            min_numeric_value=60
+        )
+    )
+
+    assert result["filtered_row_count"] == 1
+    assert result["cohort"][0]["sample_id"] == "S1"
+
+
+def test_exact_and_numeric_filters_cannot_mix(
+    fake_analysis_table
+):
+    with pytest.raises(HTTPException) as error:
+        api.build_filtered_clinical_genomic_cohort(
+            study_id="test_study",
+            gene_symbols=["BRAF"],
+            clinical_attribute="AGE",
+            clinical_value="70",
+            min_numeric_value=60
+        )
+
+    assert error.value.status_code == 400
+
+
+def test_quality_summary_counts_missing_values():
+    summary = api.build_analysis_quality_summary(
+        FAKE_ANALYSIS_DATA["analysis_table"]
+    )
+
+    msi_summary = next(
+        column
+        for column in summary["columns"]
+        if column["column_name"] == "MSI_SCORE"
+    )
+
+    assert msi_summary["non_missing_count"] == 1
+    assert msi_summary["missing_count"] == 2
+    assert msi_summary["missing_percent"] == 66.67
+    assert "MSI_SCORE" in summary["sparse_columns"]
